@@ -10,18 +10,22 @@ import {
   toCanonicalContent,
 } from "@/lib/post-token-manager"
 
+// 這支一定要跑在 Node 環境
 export const runtime = "nodejs"
+// 避免被任何最佳化/快取干擾，強制動態
+export const dynamic = "force-dynamic"
+// （可選）偏好靠近台灣的區域，加快冷啟
+export const preferredRegion = ["sin1", "hkg1"]
+
 try { setDefaultResultOrder("ipv4first") } catch {}
 
-/** 發佈後可編輯/存活天數（預設 7；可用 env PUBLISHED_TTL_DAYS 覆寫） */
 const PUBLISHED_TTL_DAYS = Number(process.env.PUBLISHED_TTL_DAYS || 7)
-/** 上傳圖片後，1 分鐘內非修改訊息就再次推教學（不含代碼） */
 const REMIND_WINDOW_SECS = 60
 
 const TABLE = "near_expiry_posts"
 const BUCKET = "near_expiry_images"
 const PREFS = "line_user_settings"
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "" // 官網連結（可留空）
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || ""
 
 // ===================== 共用：ENV / 驗章 / LINE API =====================
 function env(name: string) {
@@ -35,8 +39,8 @@ function verifySignature(rawBody: string, signatureHeader: string | null) {
   try {
     const mac = crypto.createHmac("sha256", env("LINE_CHANNEL_SECRET"))
     mac.update(rawBody)
-    // 正確的作法：兩邊都用 base64 bytes 比對
     const expectedB64 = mac.digest("base64")
+    // 兩邊都用 base64 bytes 比對（LINE 規格）
     return crypto.timingSafeEqual(
       Buffer.from(signatureHeader, "base64"),
       Buffer.from(expectedB64, "base64")
@@ -119,22 +123,19 @@ async function upsertUserFollow(userId: string, followed: boolean) {
   await supabaseAdmin.from(PREFS).upsert({ user_id: userId, followed }, { onConflict: "user_id" })
 }
 async function setNotifyPref(userId: string, enable: boolean) {
-  await supabaseAdmin.from(PREFS).upsert({ user_id: userId, notify_new_post: enable, followed: true }, { onConflict: "user_id" })
+  await supabaseAdmin.from(PREFS).upsert(
+    { user_id: userId, notify_new_post: enable, followed: true },
+    { onConflict: "user_id" }
+  )
 }
 async function getNotifyPref(userId: string): Promise<boolean> {
   const { data } = await supabaseAdmin
-    .from(PREFS)
-    .select("notify_new_post")
-    .eq("user_id", userId)
-    .maybeSingle()
+    .from(PREFS).select("notify_new_post").eq("user_id", userId).maybeSingle()
   return Boolean(data?.notify_new_post)
 }
 async function getSubscribedUserIds(): Promise<string[]> {
   const { data, error } = await supabaseAdmin
-    .from(PREFS)
-    .select("user_id")
-    .eq("notify_new_post", true)
-    .eq("followed", true)
+    .from(PREFS).select("user_id").eq("notify_new_post", true).eq("followed", true)
   if (error) { console.error("fetch subscribers error", error); return [] }
   return (data || []).map((r: any) => r.user_id)
 }
@@ -310,7 +311,7 @@ async function publishTextOnly(
     image_url: null,
     status: "published",
     source: "line",
-    post_token_hash: hashed, // 7 天內可再編輯
+    post_token_hash: hashed,
     token_expires_at: PostTokenManager.getExpirationDate(PUBLISHED_TTL_DAYS),
   })
   if (error) { console.error("publishTextOnly insert error:", error); await replyText(replyToken, "系統忙碌中，請稍後再試。"); return }
@@ -341,15 +342,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true })
   } catch (e) {
     console.error("[LINE webhook fatal]", e)
-    // 仍回 200，避免 Verify 失敗
+    // 即便失敗也回 200，避免 Verify 報紅
     return NextResponse.json({ ok: true })
   }
 }
 
-// 背景工作：真正處理事件（與你原本邏輯相同）
+// 背景工作：真正處理事件
 async function handleWebhook(rawBody: string, signatureOk: boolean) {
   try {
-    // 簽章不對直接丟棄（但不阻擋外層 200）
     if (!signatureOk) { console.warn("[LINE] signature verify failed"); return }
 
     await cleanupExpiredDrafts()
