@@ -1,37 +1,26 @@
-"use client"
+// app/layout.tsx
+import type { Metadata } from "next";
+import { Inter } from "next/font/google";
+import "@/app/globals.css";
+import Providers from "./providers";
 
-import { Inter } from "next/font/google"
-import { ThemeProvider } from "next-themes"
-import { Toaster } from "@/components/ui/toaster"
-import { useEffect } from "react"
-import { initializeAppData } from "@/lib/sync-service"
-import "@/app/globals.css"
+const inter = Inter({ subsets: ["latin"] });
 
-const inter = Inter({ subsets: ["latin"] })
+export const metadata: Metadata = {
+  title: "CampusFood",
+  description: "CampusFood — 校園即食消息與訂單系統",
+};
 
 export default function RootLayout({
   children,
 }: {
-  children: React.ReactNode
+  children: React.ReactNode;
 }) {
-  // 初始化應用數據
-  useEffect(() => {
-    initializeAppData()
-  }, [])
-
   return (
-    <html lang="zh-TW" suppressHydrationWarning>
+    <html lang="zh-Hant" suppressHydrationWarning>
       <body className={inter.className}>
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
-          {children}
-          <Toaster />
-        </ThemeProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
-  )
+  );
 }
