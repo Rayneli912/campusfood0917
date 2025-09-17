@@ -1,14 +1,12 @@
-import { NextRequest, NextResponse } from "next/server"
+// app/api/news/[id]/route.ts
+import { NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase/admin"
 
 // PUT - 更新新聞
-export async function PUT(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(req: Request, { params }) {
   try {
     const body = await req.json()
-    const { title, content, source, isPublished, image_url, quantity, deadline, note } = body
+    const { title, content, source, isPublished, image_url } = body
 
     if (!title || !content || !source) {
       return NextResponse.json(
@@ -26,7 +24,7 @@ export async function PUT(
         status: isPublished ? "published" : "draft",
         image_url: image_url || null,
       })
-      .eq("id", params.id)
+      .eq("id", params?.id)
       .select()
       .single()
 
@@ -47,15 +45,12 @@ export async function PUT(
 }
 
 // DELETE - 刪除新聞
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(_req: Request, { params }) {
   try {
     const { data, error } = await supabaseAdmin
       .from("near_expiry_posts")
       .delete()
-      .eq("id", params.id)
+      .eq("id", params?.id)
       .select()
       .single()
 
