@@ -35,9 +35,15 @@ function verifySignature(rawBody: string, signatureHeader: string | null) {
   try {
     const mac = crypto.createHmac("sha256", env("LINE_CHANNEL_SECRET"))
     mac.update(rawBody)
-    const expected = mac.digest("base64")
-    return crypto.timingSafeEqual(Buffer.from(signatureHeader), Buffer.from(expected))
-  } catch { return false }
+    // 正確的作法：兩邊都用 base64 bytes 比對
+    const expectedB64 = mac.digest("base64")
+    return crypto.timingSafeEqual(
+      Buffer.from(signatureHeader, "base64"),
+      Buffer.from(expectedB64, "base64")
+    )
+  } catch {
+    return false
+  }
 }
 
 async function replyMessages(replyToken: string | undefined, messages: any[]) {
@@ -321,16 +327,34 @@ async function publishTextOnly(
   await broadcastNewPostNotice()
 }
 
-// ===================== 主入口 =====================
+// ===================== 主入口：先回 200，再背景處理 =====================
 export async function POST(req: NextRequest) {
   try {
+    const rawBody = await req.text()
+    const signature = req.headers.get("x-line-signature")
+    const isValid = verifySignature(rawBody, signature)
+
+    // 立刻回 200（避免 LINE Verify 超時）
+    setImmediate(() => {
+      handleWebhook(rawBody, isValid).catch((e) => console.error("[webhook bg error]", e))
+    })
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    console.error("[LINE webhook fatal]", e)
+    // 仍回 200，避免 Verify 失敗
+    return NextResponse.json({ ok: true })
+  }
+}
+
+// 背景工作：真正處理事件（與你原本邏輯相同）
+async function handleWebhook(rawBody: string, signatureOk: boolean) {
+  try {
+    // 簽章不對直接丟棄（但不阻擋外層 200）
+    if (!signatureOk) { console.warn("[LINE] signature verify failed"); return }
+
     await cleanupExpiredDrafts()
     await cleanupExpiredPublished()
 
-    const rawBody = await req.text()
-    if (!verifySignature(rawBody, req.headers.get("x-line-signature"))) {
-      console.warn("[LINE] signature verify failed"); return NextResponse.json({ ok: true })
-    }
     const body = JSON.parse(rawBody)
 
     for (const event of body.events ?? []) {
@@ -389,7 +413,6 @@ export async function POST(req: NextRequest) {
       // 訊息事件
       if (event.type === "message") {
         if (event.message.type === "image") {
-          // ⚠️ 修復：先建草稿＋立即回覆；之後再抓圖與上傳，避免用戶看起來「沒回應」
           await handleImageOnly(event.message.id, userId, replyToken)
           continue
         }
@@ -399,7 +422,7 @@ export async function POST(req: NextRequest) {
           const text = rawText.trim()
           const tNorm = normalizeSimple(text)
 
-          // 訂閱指令（更寬鬆；同狀態回覆）
+          // 訂閱指令
           if (userId && STATUS_RE.test(tNorm)) {
             const on = await getNotifyPref(userId)
             await replyText(replyToken, on ? "目前狀態：已開啟即食通知 ✅" : "目前狀態：未開啟即食通知 ❌")
@@ -429,7 +452,7 @@ export async function POST(req: NextRequest) {
             continue
           }
 
-          // 非修改文字：若 60 秒內剛上傳過圖片 → 補送一次教學（不帶代碼）
+          // 非修改文字：若 60 秒內剛上傳過圖片 → 補送一次教學
           await maybeResendHint(userId, replyToken)
 
           // 無照片直接發佈
@@ -454,26 +477,21 @@ export async function POST(req: NextRequest) {
         }
       }
     }
-
-    return NextResponse.json({ ok: true })
   } catch (e) {
-    console.error("[LINE webhook fatal]", e)
-    return NextResponse.json({ ok: true })
+    console.error("[handleWebhook error]", e)
   }
 }
 
-// ===================== 圖片 → 先建草稿立即回覆，之後再抓圖上傳（修復點） =====================
+// ===================== 圖片 → 先建草稿立即回覆，之後再抓圖上傳 =====================
 async function handleImageOnly(messageId: string, userId: string | undefined, replyToken: string | undefined) {
-  // 先產生代碼並建一筆「沒有 image_url 的草稿」，立刻回覆給用戶
   const token = PostTokenManager.generateToken()
   const hashedToken = PostTokenManager.hashToken(token)
   const expiresAt = new Date(Date.now() + TOKEN_TTL_MINS * 60 * 1000).toISOString()
 
-  // 先插入草稿（image_url 先為 null），確保代碼存在
   const { error: insertErr } = await supabaseAdmin.from(TABLE).insert({
     location: null,
     content: null,
-    image_url: null,            // 先空著，後續再補
+    image_url: null,
     status: "draft",
     source: "line",
     line_user_id: userId ?? null,
@@ -486,16 +504,14 @@ async function handleImageOnly(messageId: string, userId: string | undefined, re
     return
   }
 
-  // 立刻回覆代碼與格式（避免用戶以為沒反應）
   await replyText(
     replyToken,
     `圖片新增成功！貼文代碼：${token}\n\n` +
     `請在 ${TOKEN_TTL_MINS} 分鐘內回覆以下內容來完成發佈：\n` +
     `修改+${token}\n【地點】：\n【物品】：\n【數量】：\n【領取期限】：\n【備註】：（可省略）\n\n` +
-    `＊發佈後 7 天內仍可用同一組代碼再次修改；到期會自動刪除。`
+    `＊發佈後 7 天內仍可用同一組代碼再次修改；到期將自動刪除。`
   )
 
-  // 再去抓圖→上傳→回寫 image_url（這段就算慢也不影響回覆）
   try {
     const file = await fetchLineImage(messageId)
     if (!file) return
@@ -506,8 +522,6 @@ async function handleImageOnly(messageId: string, userId: string | undefined, re
       .eq("post_token_hash", hashedToken)
   } catch (e) {
     console.error("handleImageOnly upload/update error:", e)
-    // 不再回覆用戶；若之後用戶很快就「修改+代碼」，而 image_url 還未補上，
-    // handleEditPost 會回「此代碼未綁定圖片，請稍等幾秒再試或重新上傳」，避免錯誤發布。
   }
 }
 
@@ -545,7 +559,6 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
         await replyText(replyToken, `貼文代碼已逾時（${TOKEN_TTL_MINS} 分鐘）。草稿與圖片已刪除，請重新上傳圖片。`)
         return
       }
-      // 若圖還在上傳中（image_url 為 null），請用戶稍後再送
       if (!row.image_url) {
         await replyText(replyToken, "圖片仍在處理中，請稍等幾秒再回覆「修改+代碼」。若持續失敗，請重新上傳圖片。")
         return
@@ -559,8 +572,7 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
         status: "published",
         source: "line",
         line_user_id: userId ?? null,
-        token_expires_at: PostTokenManager.getExpirationDate(PUBLISHED_TTL_DAYS), // 7 天
-        // post_token_hash 保留（7 天內可改）
+        token_expires_at: PostTokenManager.getExpirationDate(PUBLISHED_TTL_DAYS),
       }).eq("id", row.id)
       if (updErr) { console.error("update draft->publish err", updErr); await replyText(replyToken, "系統忙碌中，請稍後再試。"); return }
 
@@ -592,7 +604,6 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
       quantity: d.quantity,
       deadline: d.deadline ?? "",
       note: d.note ?? "",
-      // post_token_hash 與 token_expires_at 不變
     }).eq("id", row.id)
     if (upd2) { console.error("update published edit err", upd2); await replyText(replyToken, "系統忙碌中，請稍後再試。"); return }
 
