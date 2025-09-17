@@ -18,6 +18,22 @@ import { NEWS_DATA_UPDATED } from "@/lib/sync-service"
 import type { NewsItem } from "@/types"
 import Image from "next/image"
 
+/** 將 quantity（可能是 number 或字串或空值）安全轉為 number|null */
+function toQuantity(value: unknown): number | null {
+  if (value === undefined || value === null) return null
+  const s = String(value).trim()
+  if (!s) return null
+  const n = parseInt(s, 10)
+  return Number.isFinite(n) ? n : null
+}
+
+/** 將空字串標準化為 null（給 deadline / note 等） */
+function emptyToNull<T extends string | null | undefined>(v: T): string | null {
+  if (v === undefined || v === null) return null
+  const s = String(v).trim()
+  return s === "" ? null : s
+}
+
 // 整合後端資料庫和 localStorage 的新聞數據
 async function loadCombinedNewsData(): Promise<NewsItem[]> {
   const allNews: NewsItem[] = []
@@ -259,9 +275,9 @@ export default function NewsPage() {
           source: newsData.source,
           isPublished: newsData.isPublished,
           image_url: newsData.image_url,
-          quantity: newsData.quantity ? parseInt(newsData.quantity as string, 10) : null,
-          deadline: newsData.deadline || null,
-          note: newsData.note || null,
+          quantity: toQuantity(newsData.quantity as unknown),
+          deadline: emptyToNull(newsData.deadline as any),
+          note: emptyToNull(newsData.note as any),
         }),
       }).catch((fetchError) => {
         console.error("創建新聞 Fetch 請求失敗:", fetchError)
@@ -323,9 +339,9 @@ export default function NewsPage() {
             source: newsData.source,
             isPublished: newsData.isPublished,
             image_url: newsData.image_url,
-            quantity: newsData.quantity ? parseInt(newsData.quantity as string, 10) : null,
-            deadline: newsData.deadline || null,
-            note: newsData.note || null,
+            quantity: toQuantity(newsData.quantity as unknown),
+            deadline: emptyToNull(newsData.deadline as any),
+            note: emptyToNull(newsData.note as any),
           }),
         }).catch((fetchError) => {
           console.error("更新新聞 Fetch 請求失敗:", fetchError)
@@ -356,6 +372,9 @@ export default function NewsPage() {
             localNews[index] = {
               ...localNews[index],
               ...newsData,
+              quantity: toQuantity(newsData.quantity as unknown) ?? undefined,
+              deadline: emptyToNull(newsData.deadline as any) ?? undefined,
+              note: emptyToNull(newsData.note as any) ?? undefined,
               updatedAt: now,
             }
             localStorage.setItem("news", JSON.stringify(localNews))
@@ -523,24 +542,23 @@ export default function NewsPage() {
     try {
       let success = false
 
+      const payload = {
+        title: formData.title,
+        content: formData.content,
+        source: formData.source,
+        isPublished: formData.isPublished,
+        image_url: formData.image_url,
+        quantity: toQuantity(formData.quantity),
+        deadline: emptyToNull(formData.deadline),
+        note: emptyToNull(formData.note),
+      } as Partial<NewsItem>
+
       if (isEditing && currentNews) {
         // 編輯現有消息
-        success = await updateNews(currentNews.id, {
-          title: formData.title,
-          content: formData.content,
-          source: formData.source,
-          isPublished: formData.isPublished,
-          image_url: formData.image_url,
-        })
+        success = await updateNews(currentNews.id, payload)
       } else {
         // 新增消息
-        success = await createNews({
-          title: formData.title,
-          content: formData.content,
-          source: formData.source,
-          isPublished: formData.isPublished,
-          image_url: formData.image_url,
-        })
+        success = await createNews(payload)
       }
 
       if (success) {
@@ -682,7 +700,7 @@ export default function NewsPage() {
                 <TableRow key={news.id}>
                   {/* 地點 */}
                   <TableCell className="font-medium max-w-xs">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items中心 gap-2">
                       <MapPin className="h-4 w-4 text-green-600" />
                       <div className="truncate" title={news.title}>
                         {news.title}
