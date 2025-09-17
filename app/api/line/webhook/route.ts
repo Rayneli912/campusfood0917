@@ -10,22 +10,27 @@ import {
   toCanonicalContent,
 } from "@/lib/post-token-manager"
 
-// 這支一定要跑在 Node 環境
 export const runtime = "nodejs"
-// 避免被任何最佳化/快取干擾，強制動態
+// 讓此 Route 一律動態（避免被快取）
 export const dynamic = "force-dynamic"
-// （可選）偏好靠近台灣的區域，加快冷啟
-export const preferredRegion = ["sin1", "hkg1"]
 
 try { setDefaultResultOrder("ipv4first") } catch {}
 
+/** 發佈後可編輯/存活天數（預設 7；可用 env PUBLISHED_TTL_DAYS 覆寫） */
 const PUBLISHED_TTL_DAYS = Number(process.env.PUBLISHED_TTL_DAYS || 7)
+/** 上傳圖片後，1 分鐘內非修改訊息就再次推教學（不含代碼） */
 const REMIND_WINDOW_SECS = 60
 
 const TABLE = "near_expiry_posts"
 const BUCKET = "near_expiry_images"
 const PREFS = "line_user_settings"
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || ""
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "" // 官網連結（可留空）
+
+// --- 只給 LINE Verify 用的假 replyToken（官方文件）
+const VERIFY_TOKENS = new Set([
+  "00000000000000000000000000000000",
+  "ffffffffffffffffffffffffffffffff",
+])
 
 // ===================== 共用：ENV / 驗章 / LINE API =====================
 function env(name: string) {
@@ -39,11 +44,11 @@ function verifySignature(rawBody: string, signatureHeader: string | null) {
   try {
     const mac = crypto.createHmac("sha256", env("LINE_CHANNEL_SECRET"))
     mac.update(rawBody)
+    // 兩邊都用 base64 bytes 比對，避免字元集差異
     const expectedB64 = mac.digest("base64")
-    // 兩邊都用 base64 bytes 比對（LINE 規格）
     return crypto.timingSafeEqual(
       Buffer.from(signatureHeader, "base64"),
-      Buffer.from(expectedB64, "base64")
+      Buffer.from(expectedB64, "base64"),
     )
   } catch {
     return false
@@ -51,7 +56,7 @@ function verifySignature(rawBody: string, signatureHeader: string | null) {
 }
 
 async function replyMessages(replyToken: string | undefined, messages: any[]) {
-  if (!replyToken || messages.length === 0) return
+  if (!replyToken || messages.length === 0 || VERIFY_TOKENS.has(replyToken)) return
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 3500)
   try {
@@ -123,19 +128,22 @@ async function upsertUserFollow(userId: string, followed: boolean) {
   await supabaseAdmin.from(PREFS).upsert({ user_id: userId, followed }, { onConflict: "user_id" })
 }
 async function setNotifyPref(userId: string, enable: boolean) {
-  await supabaseAdmin.from(PREFS).upsert(
-    { user_id: userId, notify_new_post: enable, followed: true },
-    { onConflict: "user_id" }
-  )
+  await supabaseAdmin.from(PREFS).upsert({ user_id: userId, notify_new_post: enable, followed: true }, { onConflict: "user_id" })
 }
 async function getNotifyPref(userId: string): Promise<boolean> {
   const { data } = await supabaseAdmin
-    .from(PREFS).select("notify_new_post").eq("user_id", userId).maybeSingle()
+    .from(PREFS)
+    .select("notify_new_post")
+    .eq("user_id", userId)
+    .maybeSingle()
   return Boolean(data?.notify_new_post)
 }
 async function getSubscribedUserIds(): Promise<string[]> {
   const { data, error } = await supabaseAdmin
-    .from(PREFS).select("user_id").eq("notify_new_post", true).eq("followed", true)
+    .from(PREFS)
+    .select("user_id")
+    .eq("notify_new_post", true)
+    .eq("followed", true)
   if (error) { console.error("fetch subscribers error", error); return [] }
   return (data || []).map((r: any) => r.user_id)
 }
@@ -146,7 +154,7 @@ async function broadcastNewPostNotice() {
   await multicastTo(uids, [{ type: "text", text: message }])
 }
 
-// ===================== 圖片上傳 & 清理 =====================
+// ===================== 圖片上傳 & 清理（清理任務做節流、非阻塞） =====================
 async function fetchLineImage(messageId: string): Promise<{ buf: Buffer; mime: string } | null> {
   try {
     const r = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
@@ -196,6 +204,21 @@ async function cleanupExpiredPublished() {
   await Promise.all(data.map((r:any)=>removeFromStorage(r.image_url)))
   const { error: delErr } = await supabaseAdmin.from(TABLE).delete().in("id", data.map((r:any)=>r.id))
   if (delErr) console.error("[cleanup] published delete", delErr)
+}
+
+// 清理任務：每 10 分鐘最多跑一次，不阻塞回覆
+let lastCleanup = 0
+function scheduleCleanup() {
+  if (Date.now() - lastCleanup < 10 * 60 * 1000) return
+  lastCleanup = Date.now()
+  ;(async () => {
+    try {
+      await cleanupExpiredDrafts()
+      await cleanupExpiredPublished()
+    } catch (e) {
+      console.error("[cleanup] error", e)
+    }
+  })()
 }
 
 // ===================== 指令解析（更寬鬆） =====================
@@ -311,7 +334,7 @@ async function publishTextOnly(
     image_url: null,
     status: "published",
     source: "line",
-    post_token_hash: hashed,
+    post_token_hash: hashed, // 7 天內可再編輯
     token_expires_at: PostTokenManager.getExpirationDate(PUBLISHED_TTL_DAYS),
   })
   if (error) { console.error("publishTextOnly insert error:", error); await replyText(replyToken, "系統忙碌中，請稍後再試。"); return }
@@ -328,36 +351,28 @@ async function publishTextOnly(
   await broadcastNewPostNotice()
 }
 
-// ===================== 主入口：先回 200，再背景處理 =====================
+// ===================== 主入口（同步處理事件；僅 Verify 立即 200） =====================
 export async function POST(req: NextRequest) {
   try {
     const rawBody = await req.text()
-    const signature = req.headers.get("x-line-signature")
-    const isValid = verifySignature(rawBody, signature)
-
-    // 立刻回 200（避免 LINE Verify 超時）
-    setImmediate(() => {
-      handleWebhook(rawBody, isValid).catch((e) => console.error("[webhook bg error]", e))
-    })
-    return NextResponse.json({ ok: true })
-  } catch (e) {
-    console.error("[LINE webhook fatal]", e)
-    // 即便失敗也回 200，避免 Verify 報紅
-    return NextResponse.json({ ok: true })
-  }
-}
-
-// 背景工作：真正處理事件
-async function handleWebhook(rawBody: string, signatureOk: boolean) {
-  try {
-    if (!signatureOk) { console.warn("[LINE] signature verify failed"); return }
-
-    await cleanupExpiredDrafts()
-    await cleanupExpiredPublished()
+    if (!verifySignature(rawBody, req.headers.get("x-line-signature"))) {
+      console.warn("[LINE] signature verify failed"); 
+      return NextResponse.json({ ok: true })
+    }
 
     const body = JSON.parse(rawBody)
+    const events = body?.events ?? []
 
-    for (const event of body.events ?? []) {
+    // LINE 驗證用：replyToken 全是固定值 → 直接回 200，不做任何事
+    if (events.length && events.every((e: any) => VERIFY_TOKENS.has((e as any).replyToken))) {
+      return NextResponse.json({ ok: true })
+    }
+
+    // 非阻塞地排一次清理（最多 10 分鐘跑一次）
+    scheduleCleanup()
+
+    // 同步處理，確保能即時回覆使用者
+    for (const event of events) {
       const userId: string | undefined = event.source?.userId
       const replyToken: string | undefined = (event as any).replyToken
 
@@ -413,6 +428,7 @@ async function handleWebhook(rawBody: string, signatureOk: boolean) {
       // 訊息事件
       if (event.type === "message") {
         if (event.message.type === "image") {
+          // 先建立草稿並立即回覆代碼，之後抓圖補上 image_url
           await handleImageOnly(event.message.id, userId, replyToken)
           continue
         }
@@ -477,8 +493,12 @@ async function handleWebhook(rawBody: string, signatureOk: boolean) {
         }
       }
     }
+
+    return NextResponse.json({ ok: true })
   } catch (e) {
-    console.error("[handleWebhook error]", e)
+    console.error("[LINE webhook fatal]", e)
+    // 仍回 200，避免 LINE 一直重送
+    return NextResponse.json({ ok: true })
   }
 }
 
