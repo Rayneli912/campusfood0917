@@ -4,6 +4,8 @@ import { supabaseAdmin } from "@/lib/supabase/admin"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
+export const revalidate = 0
+
 try { setDefaultResultOrder("ipv4first") } catch {}
 
 const TABLE = "near_expiry_posts"
@@ -19,9 +21,17 @@ function toIntOrNull(v: unknown): number | null {
   return null
 }
 
-// OPTIONS（預檢）
+// CORS / 預檢（方便本地與雲端調用）
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204 })
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Cache-Control": "no-store",
+    },
+  })
 }
 
 // GET - 取得貼文（?includeAll=true => 含草稿/已發布；否則只給已發布）
@@ -30,10 +40,25 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url)
     const includeAll = searchParams.get("includeAll") === "true"
 
+    // ⚠️ 不能選到資料表不存在的欄位（先前加了 updated_at 會 500）
     let query = supabaseAdmin
       .from(TABLE)
       .select(
-        "id, created_at, updated_at, location, content, image_url, status, source, quantity, deadline, note, post_token_hash, token_expires_at, line_user_id"
+        [
+          "id",
+          "created_at",
+          "location",
+          "content",
+          "image_url",
+          "status",
+          "source",
+          "quantity",
+          "deadline",
+          "note",
+          "post_token_hash",
+          "token_expires_at",
+          "line_user_id",
+        ].join(",")
       )
       .order("created_at", { ascending: false })
 
@@ -44,11 +69,14 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json(
       { data },
-      { headers: { "Cache-Control": "no-store" } } // 避免被快取到舊資料
+      { headers: { "Cache-Control": "no-store" } }
     )
   } catch (error: any) {
     console.error("/api/news GET error:", error)
-    return NextResponse.json({ error: error?.message || "GET_FAILED" }, { status: 500 })
+    return NextResponse.json(
+      { error: error?.message || "GET_FAILED" },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    )
   }
 }
 
@@ -84,8 +112,8 @@ export async function POST(req: NextRequest) {
       status: isPublished ? "published" : "draft",
       image_url: image_url ? String(image_url) : null,
       quantity: toIntOrNull(quantity),
-      deadline: deadline ? String(deadline).trim() || null : null,
-      note: note ? String(note).trim() || null : null,
+      deadline: deadline ? String(deadline) : null,
+      note: note ? String(note) : null,
       // 管理員建立的貼文不綁 LINE 欄位
       line_user_id: null as string | null,
       post_token_hash: null as string | null,
@@ -95,9 +123,15 @@ export async function POST(req: NextRequest) {
     const { data, error } = await supabaseAdmin.from(TABLE).insert(row).select().single()
     if (error) throw error
 
-    return NextResponse.json({ data }, { status: 201 })
+    return NextResponse.json(
+      { data },
+      { status: 201, headers: { "Cache-Control": "no-store" } }
+    )
   } catch (error: any) {
     console.error("/api/news POST error:", error)
-    return NextResponse.json({ error: error?.message || "CREATE_FAILED" }, { status: 500 })
+    return NextResponse.json(
+      { error: error?.message || "CREATE_FAILED" },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    )
   }
 }
