@@ -3,6 +3,7 @@ import { setDefaultResultOrder } from "dns"
 import { supabaseAdmin } from "@/lib/supabase/admin"
 
 export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
 try { setDefaultResultOrder("ipv4first") } catch {}
 
 const TABLE = "near_expiry_posts"
@@ -18,13 +19,17 @@ function toIntOrNull(v: unknown): number | null {
   return null
 }
 
+// OPTIONS（預檢）
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204 })
+}
+
 // GET - 取得貼文（?includeAll=true => 含草稿/已發布；否則只給已發布）
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url)
     const includeAll = searchParams.get("includeAll") === "true"
 
-    // 選出前端會用到的欄位（含 quantity/deadline/note 等）
     let query = supabaseAdmin
       .from(TABLE)
       .select(
@@ -37,7 +42,10 @@ export async function GET(req: NextRequest) {
     const { data, error } = await query
     if (error) throw error
 
-    return NextResponse.json({ data })
+    return NextResponse.json(
+      { data },
+      { headers: { "Cache-Control": "no-store" } } // 避免被快取到舊資料
+    )
   } catch (error: any) {
     console.error("/api/news GET error:", error)
     return NextResponse.json({ error: error?.message || "GET_FAILED" }, { status: 500 })
@@ -76,8 +84,8 @@ export async function POST(req: NextRequest) {
       status: isPublished ? "published" : "draft",
       image_url: image_url ? String(image_url) : null,
       quantity: toIntOrNull(quantity),
-      deadline: deadline ? String(deadline) : null,
-      note: note ? String(note) : null,
+      deadline: deadline ? String(deadline).trim() || null : null,
+      note: note ? String(note).trim() || null : null,
       // 管理員建立的貼文不綁 LINE 欄位
       line_user_id: null as string | null,
       post_token_hash: null as string | null,
