@@ -34,58 +34,70 @@ function emptyToNull<T extends string | null | undefined>(v: T): string | null {
   return s === "" ? null : s
 }
 
-// 整合後端資料庫和 localStorage 的新聞數據
+/** 整合後端資料庫和 localStorage 的新聞數據（避快取 + 更穩健） */
 async function loadCombinedNewsData(): Promise<NewsItem[]> {
   const allNews: NewsItem[] = []
 
-  // 並行載入後端資料和本地資料
-  const [backendData, localData] = await Promise.allSettled([
-    // 1. 從後端資料庫載入所有新聞（包括草稿和已發布）
-    fetch("/api/news?includeAll=true").then(response => response.ok ? response.json() : null),
-    // 2. 從 localStorage 載入本地新聞
-    Promise.resolve((() => {
-      try {
-        const storedNews = localStorage.getItem("news")
-        return storedNews ? JSON.parse(storedNews) as NewsItem[] : []
-      } catch (error) {
-        console.error("載入本地新聞數據失敗:", error)
-        return []
-      }
-    })())
-  ])
+  // 並行載入後端資料和本地資料。加入 ts 參數避快取，並使用 no-store。
+  const backendReq = fetch(`/api/news?includeAll=true&ts=${Date.now()}`, {
+    cache: "no-store",
+  })
+    .then(async (res) => {
+      if (!res.ok) return null
+      const json = await res.json().catch(() => null)
+      // 後端格式為 { data: [...] }
+      if (json && Array.isArray(json.data)) return json.data as any[]
+      return null
+    })
+    .catch((e) => {
+      console.error("載入後端新聞數據失敗(fetch):", e)
+      return null
+    })
 
-  // 處理後端資料
-  if (backendData.status === 'fulfilled' && backendData.value?.data) {
-    const mappedBackendNews: NewsItem[] = backendData.value.data.map((post: any) => ({
+  const localReq = Promise.resolve().then(() => {
+    try {
+      const storedNews = localStorage.getItem("news")
+      return storedNews ? (JSON.parse(storedNews) as NewsItem[]) : []
+    } catch (error) {
+      console.error("載入本地新聞數據失敗:", error)
+      return [] as NewsItem[]
+    }
+  })
+
+  const [backendData, localData] = await Promise.allSettled([backendReq, localReq])
+
+  // 後端 → NewsItem[]
+  if (backendData.status === "fulfilled" && Array.isArray(backendData.value)) {
+    const mappedBackendNews: NewsItem[] = backendData.value.map((post: any) => ({
       id: `backend_${post.id}`,
       title: post.location ?? "未標地點",
       content: post.content ?? "",
-      date: post.created_at,
+      date: post.created_at ?? post.updated_at ?? new Date().toISOString(),
       source: post.source ?? "系統公告",
       isPublished: post.status === "published",
-      createdAt: post.created_at,
-      updatedAt: post.created_at,
-      image_url: post.image_url,
-      location: post.location,
-      quantity: post.quantity,
-      deadline: post.deadline,
-      note: post.note,
-      post_token_hash: post.post_token_hash,
-      token_expires_at: post.token_expires_at,
+      createdAt: post.created_at ?? undefined,
+      updatedAt: post.updated_at ?? undefined,
+      image_url: post.image_url ?? null,
+      location: post.location ?? null,
+      quantity: post.quantity ?? null,
+      deadline: post.deadline ?? null,
+      note: post.note ?? null,
+      post_token_hash: post.post_token_hash ?? null,
+      token_expires_at: post.token_expires_at ?? null,
     }))
     allNews.push(...mappedBackendNews)
-  } else if (backendData.status === 'rejected') {
+  } else if (backendData.status === "rejected") {
     console.error("載入後端新聞數據失敗:", backendData.reason)
   }
 
-  // 處理本地資料
-  if (localData.status === 'fulfilled' && localData.value) {
+  // 本地 → NewsItem[]
+  if (localData.status === "fulfilled" && Array.isArray(localData.value)) {
     allNews.push(...localData.value)
-  } else if (localData.status === 'rejected') {
+  } else if (localData.status === "rejected") {
     console.error("載入本地新聞數據失敗:", localData.reason)
   }
 
-  // 3. 如果沒有任何數據，使用預設數據
+  // 若兩邊都為空，才回退到預設
   if (allNews.length === 0) {
     const defaultNews: NewsItem[] = [
       {
@@ -112,17 +124,11 @@ async function loadCombinedNewsData(): Promise<NewsItem[]> {
     allNews.push(...defaultNews)
   }
 
-  // 4. 去重（基於 ID）並按日期排序
-  const uniqueNews = allNews.filter((news, index, self) => 
-    index === self.findIndex((n) => n.id === news.id)
+  // 去重 + 依日期排序
+  const uniqueNews = allNews.filter(
+    (news, index, self) => index === self.findIndex((n) => n.id === news.id),
   )
-
-  uniqueNews.sort((a, b) => {
-    const dateA = new Date(a.date).getTime()
-    const dateB = new Date(b.date).getTime()
-    return dateB - dateA // 最新的在前
-  })
-
+  uniqueNews.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
   return uniqueNews
 }
 
@@ -241,7 +247,6 @@ export default function NewsPage() {
     }
   }, [])
 
-  // 在組件載入和店家資料更新時重新載入來源
   useEffect(() => {
     loadAvailableSources()
     
@@ -700,7 +705,7 @@ export default function NewsPage() {
                 <TableRow key={news.id}>
                   {/* 地點 */}
                   <TableCell className="font-medium max-w-xs">
-                    <div className="flex items中心 gap-2">
+                    <div className="flex items-center gap-2">
                       <MapPin className="h-4 w-4 text-green-600" />
                       <div className="truncate" title={news.title}>
                         {news.title}
