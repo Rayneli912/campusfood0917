@@ -1,0 +1,62 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Store {
+  id        String  @id
+  storeCode String? @unique
+
+  // Relations
+  orders    Order[]
+
+  @@map("stores")
+}
+
+model Order {
+  id         String     @id @default(cuid())
+  storeId    String
+  userId     String
+  status     String
+  note       String?
+  expiresAt  DateTime?
+  createdAt  DateTime   @default(now())
+
+  // Relations
+  store      Store      @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  items      OrderItem[]
+
+  @@index([storeId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id         String  @id @default(cuid())
+  orderId    String
+  foodItemId String?
+  name       String
+  price      Int
+  quantity   Int
+
+  // Relations
+  order      Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+model OrderCounter {
+  id      Int    @id @default(autoincrement())
+  storeId String
+  dateStr String
+  seq     Int    @default(1)
+
+  @@unique([storeId, dateStr], name: "storeId_dateStr")
+  @@map("order_counters")
+}
