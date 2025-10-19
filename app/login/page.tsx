@@ -142,33 +142,22 @@ export default function LoginPage() {
         return
       }
 
-      console.log("🔐 嘗試登入店家帳號:", storeForm.username)
+      console.log("嘗試登入店家帳號:", storeForm.username)
 
-      // 調用登入 API
+      // 使用 API 登入
       const response = await fetch("/api/auth/store/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(storeForm),
-        credentials: "include", // ✅ 确保包含 cookies
       })
 
-      console.log("📥 客户端：登录 API 响应状态:", response.status)
-      console.log("📥 客户端：响应 headers:", {
-        contentType: response.headers.get('content-type'),
-        setCookie: response.headers.get('set-cookie')
-      })
-      
       const data = await response.json()
-      console.log("📥 客户端：登录 API 完整数据:", JSON.stringify(data, null, 2))
-      console.log("📥 客户端：data.success =", data.success)
-      console.log("📥 客户端：data.store =", data.store)
 
       if (data.success && data.store) {
-        console.log("✅ 客户端：条件满足，准备跳转!", {
-          name: data.store.name,
-          id: data.store.id,
-          username: data.store.username
-        })
+        console.log("店家帳號驗證成功:", data.store.name)
+
+        // 儲存帳號資訊到 localStorage
+        localStorage.setItem("storeAccount", JSON.stringify(data.store))
 
         // 顯示成功訊息
         toast({
@@ -176,35 +165,30 @@ export default function LoginPage() {
           description: `歡迎回來，${data.store.name}`,
         })
 
-        // ✅ 立即跳转
-        console.log("🚀 客户端：执行 window.location.href = '/store/dashboard'")
-        console.log("🚀 客户端：当前 URL:", window.location.href)
-        window.location.href = "/store/dashboard"
-        console.log("🚀 客户端：跳转命令已执行")
-        
+        // 導向店家首頁
+        setTimeout(() => {
+          router.push("/store/dashboard")
+        }, 100)
       } else {
-        console.log("❌ 客户端：条件不满足，显示详细信息:")
-        console.log("  - data.success:", data.success, typeof data.success)
-        console.log("  - data.store:", data.store)
-        console.log("  - data 完整内容:", data)
-        
+        console.log("店家帳號驗證失敗")
+
+        // 顯示錯誤訊息
         toast({
           title: "登入失敗",
           description: data.message || "帳號或密碼錯誤",
           variant: "destructive",
         })
-        setIsLoading(false)
       }
     } catch (error) {
-      console.error("❌ 客户端：店家登入過程中發生錯誤:", error)
+      console.error("店家登入過程中發生錯誤:", error)
       toast({
         title: "登入失敗",
         description: "發生錯誤，請稍後再試",
         variant: "destructive",
       })
-      setIsLoading(false) // ✅ 只在错误时重置
+    } finally {
+      setIsLoading(false)
     }
-    // ✅ 移除 finally 块，避免在成功跳转前重置 loading 状态
   }
 
   return (

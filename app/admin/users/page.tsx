@@ -72,11 +72,15 @@ export default function AdminUsersPage() {
   
   // 批量操作
   const [showBulkDialog, setShowBulkDialog] = useState(false)
-  const [bulkAction, setBulkAction] = useState<"enable" | "disable">("enable")
+  const [bulkAction, setBulkAction] = useState<"enable" | "disable" | "restore">("enable")
   const [bulkProcessing, setBulkProcessing] = useState(false)
   
   // LINE 暱稱同步
   const [syncingNames, setSyncingNames] = useState(false)
+  
+  // 記憶回復功能 - 備份開啟通知的用戶列表
+  const [backupUserIds, setBackupUserIds] = useState<string[]>([])
+  const [hasBackup, setHasBackup] = useState(false)
   
   const [isMobile, setIsMobile] = useState(false)
 
@@ -92,6 +96,24 @@ export default function AdminUsersPage() {
     return () => {
       window.removeEventListener("resize", checkScreenSize)
     }
+  }, [])
+
+  // 從 localStorage 載入備份數據
+  useEffect(() => {
+    const loadBackup = () => {
+      try {
+        const backup = localStorage.getItem("lineNotifyBackup")
+        if (backup) {
+          const data = JSON.parse(backup)
+          setBackupUserIds(data.userIds || [])
+          setHasBackup(true)
+          console.log(`[備份] 已載入 ${data.userIds?.length || 0} 位用戶的備份`)
+        }
+      } catch (error) {
+        console.error("載入備份數據失敗:", error)
+      }
+    }
+    loadBackup()
   }, [])
 
   // 載入平台用戶列表
@@ -208,10 +230,61 @@ export default function AdminUsersPage() {
     }
   }
 
+  // 儲存備份到 localStorage
+  const saveBackup = (userIds: string[]) => {
+    try {
+      const backup = {
+        userIds,
+        timestamp: new Date().toISOString(),
+      }
+      localStorage.setItem("lineNotifyBackup", JSON.stringify(backup))
+      setBackupUserIds(userIds)
+      setHasBackup(true)
+      console.log(`[備份] 已保存 ${userIds.length} 位用戶的狀態`)
+    } catch (error) {
+      console.error("保存備份失敗:", error)
+    }
+  }
+
+  // 清除備份
+  const clearBackup = () => {
+    try {
+      localStorage.removeItem("lineNotifyBackup")
+      setBackupUserIds([])
+      setHasBackup(false)
+      console.log("[備份] 已清除備份")
+    } catch (error) {
+      console.error("清除備份失敗:", error)
+    }
+  }
+
   // 批量開啟/關閉所有用戶的即食通知
   const bulkToggleNotify = async (enable: boolean) => {
     setBulkProcessing(true)
     try {
+      // ★ 如果是關閉操作，先備份當前開啟通知的用戶
+      if (!enable) {
+        // 從資料庫獲取當前開啟通知的用戶列表
+        const { data: enabledUsers, error: fetchError } = await supabase
+          .from("line_user_settings")
+          .select("user_id")
+          .eq("followed", true)
+          .eq("notify_new_post", true)
+
+        if (fetchError) throw fetchError
+
+        const userIds = (enabledUsers || []).map(u => u.user_id)
+        
+        // 保存備份
+        saveBackup(userIds)
+        
+        toast({
+          title: "已備份當前狀態",
+          description: `已保存 ${userIds.length} 位開啟通知的用戶資料`,
+        })
+      }
+
+      // 執行批量更新
       const { error } = await supabase
         .from("line_user_settings")
         .update({ notify_new_post: enable })
@@ -231,6 +304,59 @@ export default function AdminUsersPage() {
       toast({
         title: "錯誤",
         description: "批量更新即食通知狀態時發生錯誤",
+        variant: "destructive",
+      })
+    } finally {
+      setBulkProcessing(false)
+      setShowBulkDialog(false)
+    }
+  }
+
+  // 回復到備份的狀態
+  const restoreFromBackup = async () => {
+    if (!hasBackup || backupUserIds.length === 0) {
+      toast({
+        title: "無可用備份",
+        description: "沒有找到備份數據",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setBulkProcessing(true)
+    try {
+      // ★ 步驟1：先關閉所有用戶的通知
+      const { error: disableError } = await supabase
+        .from("line_user_settings")
+        .update({ notify_new_post: false })
+        .eq("followed", true)
+
+      if (disableError) throw disableError
+
+      // ★ 步驟2：只開啟備份列表中的用戶通知
+      const { error: restoreError } = await supabase
+        .from("line_user_settings")
+        .update({ notify_new_post: true })
+        .in("user_id", backupUserIds)
+        .eq("followed", true) // 確保只更新仍在追蹤的用戶
+
+      if (restoreError) throw restoreError
+
+      // 重新載入數據
+      await loadLineUsers()
+
+      toast({
+        title: "回復成功",
+        description: `已回復 ${backupUserIds.length} 位用戶的通知狀態`,
+      })
+
+      // 清除備份（回復後就不需要了）
+      clearBackup()
+    } catch (error) {
+      console.error("回復備份狀態時發生錯誤:", error)
+      toast({
+        title: "錯誤",
+        description: "回復備份狀態時發生錯誤",
         variant: "destructive",
       })
     } finally {
@@ -538,6 +664,33 @@ export default function AdminUsersPage() {
                 </Card>
               </div>
 
+              {/* 備份狀態提示 */}
+              {hasBackup && (
+                <div className="rounded-lg border border-blue-200 bg-blue-50 dark:bg-blue-900/20 p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <RefreshCw className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+                      <div>
+                        <p className="font-medium text-blue-900 dark:text-blue-100">
+                          已有備份可用
+                        </p>
+                        <p className="text-sm text-blue-700 dark:text-blue-300">
+                          已保存 {backupUserIds.length} 位用戶的通知狀態，可透過「批量操作」進行回復
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={clearBackup}
+                      className="text-blue-600 hover:text-blue-700 border-blue-300"
+                    >
+                      清除備份
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               {/* 搜索 */}
               <div className="flex items-center gap-2">
                 <div className="relative flex-1">
@@ -655,31 +808,65 @@ export default function AdminUsersPage() {
             <AlertDialogTitle>批量操作即食通知</AlertDialogTitle>
             <AlertDialogDescription>
               選擇要執行的操作：
+              {hasBackup && (
+                <span className="block mt-2 text-blue-600 dark:text-blue-400">
+                  ✓ 已有備份（{backupUserIds.length} 位用戶）
+                </span>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="flex gap-2">
-            <Button
-              variant={bulkAction === "enable" ? "default" : "outline"}
-              onClick={() => setBulkAction("enable")}
-              className="flex-1"
-            >
-              <Bell className="h-4 w-4 mr-2" />
-              開啟所有通知
-            </Button>
-            <Button
-              variant={bulkAction === "disable" ? "default" : "outline"}
-              onClick={() => setBulkAction("disable")}
-              className="flex-1"
-            >
-              <BellOff className="h-4 w-4 mr-2" />
-              關閉所有通知
-            </Button>
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-2">
+              <Button
+                variant={bulkAction === "enable" ? "default" : "outline"}
+                onClick={() => setBulkAction("enable")}
+                className="flex-1"
+              >
+                <Bell className="h-4 w-4 mr-2" />
+                開啟所有通知
+              </Button>
+              <Button
+                variant={bulkAction === "disable" ? "default" : "outline"}
+                onClick={() => setBulkAction("disable")}
+                className="flex-1"
+              >
+                <BellOff className="h-4 w-4 mr-2" />
+                關閉所有通知
+              </Button>
+            </div>
+            {hasBackup && (
+              <Button
+                variant={bulkAction === "restore" ? "default" : "outline"}
+                onClick={() => setBulkAction("restore")}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+              >
+                <RefreshCw className="h-4 w-4 mr-2" />
+                回復上次狀態（{backupUserIds.length} 位用戶）
+              </Button>
+            )}
           </div>
+          {bulkAction === "disable" && (
+            <div className="rounded-md bg-yellow-50 dark:bg-yellow-900/20 p-3 text-sm text-yellow-800 dark:text-yellow-200">
+              💡 執行前會自動備份當前狀態，之後可以一鍵回復
+            </div>
+          )}
+          {bulkAction === "restore" && (
+            <div className="rounded-md bg-blue-50 dark:bg-blue-900/20 p-3 text-sm text-blue-800 dark:text-blue-200">
+              💡 將回復到關閉前的狀態，回復後備份會被清除
+            </div>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={bulkProcessing}>取消</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => bulkToggleNotify(bulkAction === "enable")}
+              onClick={() => {
+                if (bulkAction === "restore") {
+                  restoreFromBackup()
+                } else {
+                  bulkToggleNotify(bulkAction === "enable")
+                }
+              }}
               disabled={bulkProcessing}
+              className={bulkAction === "restore" ? "bg-blue-600 hover:bg-blue-700" : ""}
             >
               {bulkProcessing ? "處理中..." : "確認執行"}
             </AlertDialogAction>

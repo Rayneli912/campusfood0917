@@ -75,13 +75,26 @@ async function replyMessages(replyToken: string | undefined, messages: any[]) {
       body: JSON.stringify({ replyToken, messages }),
       signal: controller.signal,
     })
-    if (!res.ok) console.error("LINE reply error", res.status, await res.text())
+    if (!res.ok) {
+      const errorText = await res.text()
+      console.error("LINE reply error", res.status, errorText)
+      // 額度用完或其他 LINE API 錯誤不應影響主要功能
+      if (res.status === 429 || res.status === 403) {
+        console.warn("[LINE] 訊息額度可能已用完或權限問題，但不影響資料庫操作")
+      }
+    }
   } catch (e) {
     console.error("LINE reply error", e)
+    // 捕獲所有錯誤，確保不會影響主流程
   } finally { clearTimeout(timer) }
 }
 async function replyText(replyToken: string | undefined, text: string) {
-  await replyMessages(replyToken, [{ type: "text", text }])
+  // 包裝成完全安全的操作，失敗也不會拋出錯誤
+  try {
+    await replyMessages(replyToken, [{ type: "text", text }])
+  } catch (e) {
+    console.error("replyText error (non-critical):", e)
+  }
 }
 
 async function pushTo(userId: string, messages: any[]) {
@@ -212,12 +225,22 @@ async function updateUserDisplayName(userId: string) {
 }
 /** ★只有改這裡：多一個時間字串參數 */
 async function broadcastNewPostNotice(tsLabel: string) {
-  const message =
-    `${tsLabel} 有新的即期食品出現囉！快到惜食快go官網看看！👀` +
-    (SITE_URL ? `\n${SITE_URL}` : "")
-  const uids = await getSubscribedUserIds()
-  if (!uids.length) return
-  await multicastTo(uids, [{ type: "text", text: message }])
+  try {
+    const message =
+      `${tsLabel} 有新的即期食品出現囉！快到惜食快go官網看看！👀` +
+      (SITE_URL ? `\n${SITE_URL}` : "")
+    const uids = await getSubscribedUserIds()
+    if (!uids.length) {
+      console.log("[LINE] 沒有訂閱用戶，跳過推播")
+      return
+    }
+    console.log(`[LINE] 準備推播給 ${uids.length} 位訂閱用戶`)
+    await multicastTo(uids, [{ type: "text", text: message }])
+    console.log("[LINE] 推播完成")
+  } catch (e) {
+    // 推播失敗不應影響發佈到網頁的功能
+    console.error("[LINE] 推播通知失敗（不影響發佈）:", e)
+  }
 }
 
 // ===================== 圖片上傳 & 清理（原樣保留） =====================
@@ -390,6 +413,7 @@ async function publishTextOnly(
 
   const nowIso = new Date().toISOString()
 
+  // ★ 步驟1：發佈到資料庫（網頁）- 這是核心功能
   const { error } = await supabaseAdmin.from(TABLE).insert({
     line_user_id: userId ?? null,
     location: fields.location,
@@ -402,10 +426,19 @@ async function publishTextOnly(
     source: "line",
     post_token_hash: hashed,
     token_expires_at: PostTokenManager.getExpirationDate(PUBLISHED_TTL_DAYS),
-    published_at: nowIso,          // ★ 新增
+    published_at: nowIso,
   })
-  if (error) { console.error("publishTextOnly insert error:", error); await replyText(replyToken, "系統忙碌中，請稍後再試。"); return }
+  
+  if (error) {
+    console.error("publishTextOnly insert error:", error)
+    await replyText(replyToken, "系統忙碌中，請稍後再試。")
+    return
+  }
 
+  // ★ 資料庫發佈成功！以下的 LINE 回覆和推播即使失敗也不影響發佈結果
+  console.log(`[LINE] 訊息已成功發佈到網頁（代碼: ${token}）`)
+
+  // ★ 步驟2：回覆用戶（選用功能，失敗不影響發佈）
   await replyText(
     replyToken,
     `發佈成功！（無照片）\n貼文代碼：${token}\n` +
@@ -415,7 +448,8 @@ async function publishTextOnly(
     `＊此貼文在 ${PUBLISHED_TTL_DAYS} 天內可用「修改+代碼」重編輯；到期將自動刪除。`
   )
 
-  await broadcastNewPostNotice(formatTsForTW(nowIso)) // ★ 時間戳
+  // ★ 步驟3：推播給訂閱用戶（選用功能，失敗不影響發佈）
+  await broadcastNewPostNotice(formatTsForTW(nowIso))
 }
 
 // ===================== 主入口（保留） =====================
@@ -644,6 +678,7 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
 
       const nowIso = new Date().toISOString()
 
+      // ★ 步驟1：發佈到資料庫（網頁）- 這是核心功能
       const { error: updErr } = await supabaseAdmin.from(TABLE).update({
         location: d.location,
         content,
@@ -654,10 +689,19 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
         source: "line",
         line_user_id: userId ?? null,
         token_expires_at: PostTokenManager.getExpirationDate(PUBLISHED_TTL_DAYS),
-        published_at: nowIso,     // ★ 首次發佈時間
+        published_at: nowIso,
       }).eq("id", row.id)
-      if (updErr) { console.error("update draft->publish err", updErr); await replyText(replyToken, "系統忙碌中，請稍後再試。"); return }
+      
+      if (updErr) {
+        console.error("update draft->publish err", updErr)
+        await replyText(replyToken, "系統忙碌中，請稍後再試。")
+        return
+      }
 
+      // ★ 資料庫發佈成功！以下的 LINE 回覆和推播即使失敗也不影響發佈結果
+      console.log(`[LINE] 草稿已成功發佈到網頁（代碼: ${token}）`)
+
+      // ★ 步驟2：回覆用戶（選用功能，失敗不影響發佈）
       await replyText(
         replyToken,
         `發佈成功！（代碼 ${token}）\n` +
@@ -667,7 +711,8 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
         `＊此貼文在 ${PUBLISHED_TTL_DAYS} 天內可用「修改+代碼」重編輯；到期將自動刪除。`
       )
 
-      await broadcastNewPostNotice(formatTsForTW(nowIso))   // ★ 推播加時間
+      // ★ 步驟3：推播給訂閱用戶（選用功能，失敗不影響發佈）
+      await broadcastNewPostNotice(formatTsForTW(nowIso))
       return
     }
 
@@ -680,6 +725,7 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
       return
     }
 
+    // ★ 步驟1：更新資料庫（網頁）- 這是核心功能
     const { error: upd2 } = await supabaseAdmin.from(TABLE).update({
       location: d.location,
       content,
@@ -687,8 +733,17 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
       deadline: d.deadline ?? "",
       note: d.note ?? "",
     }).eq("id", row.id)
-    if (upd2) { console.error("update published edit err", upd2); await replyText(replyToken, "系統忙碌中，請稍後再試。"); return }
+    
+    if (upd2) {
+      console.error("update published edit err", upd2)
+      await replyText(replyToken, "系統忙碌中，請稍後再試。")
+      return
+    }
 
+    // ★ 資料庫更新成功！以下的 LINE 回覆即使失敗也不影響更新結果
+    console.log(`[LINE] 已發佈貼文修改成功（代碼: ${token}）`)
+
+    // ★ 步驟2：回覆用戶（選用功能，失敗不影響更新）
     await replyText(
       replyToken,
       `修改完成！（代碼 ${token}）\n【地點】${d.location}\n【物品】${d.item}\n` +

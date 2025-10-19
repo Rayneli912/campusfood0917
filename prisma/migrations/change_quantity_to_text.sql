@@ -23,3 +23,4 @@ COMMENT ON COLUMN near_expiry_posts.quantity IS '数量字段（支持任意文�
 -- ✅ 执行成功后，quantity 字段将可以接受任意文本
 -- ========================================
 
+
