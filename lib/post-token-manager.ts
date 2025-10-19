@@ -164,11 +164,12 @@ function extractQuantityAndUnit(raw: string): { n?: number; unit?: string } {
   return {}
 }
 
-/** 將文字用「別名 + :」掃描，擷取到下一個別名出現前的值 */
+/** 將文字用「別名 + :」掃描，擷取到下一個別名出現前的值（冒號可選） */
 function parseLooseKeyValues(raw: string): ParsedFields {
   const text = normalizeText(raw).replace(/[【】]/g, "")
   const aliasGroup = ALL_ALIASES.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")
-  const re = new RegExp(`(?:^|\\s)(${aliasGroup})\\s*:\\s*`, "gi")
+  // ★ 修改正則：冒號變為可選 `:?`，支援「【地點】測試」和「【地點】：測試」兩種格式
+  const re = new RegExp(`(?:^|\\s)(${aliasGroup})\\s*:?\\s*`, "gi")
   const hits: { label: string; start: number; valueStart: number }[] = []
   let m: RegExpExecArray | null
   while ((m = re.exec(text)) !== null) {
