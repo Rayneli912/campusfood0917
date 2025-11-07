@@ -661,7 +661,7 @@ async function handleImageOnly(messageId: string, userId: string | undefined, re
     `圖片新增成功！貼文代碼：${token}\n\n` +
     `請在 ${TOKEN_TTL_MINS} 分鐘內回覆以下內容來完成發佈：\n` +
     `修改+${token}\n【地點】：\n【物品】：\n【數量】：\n【領取期限】：\n【備註】：（可省略）\n\n` +
-    `＊發佈後 7 天內仍可用同一組代碼再次修改；到期後將自動隱藏（管理員可在後台查看）。`
+    `＊發佈後 7 天內仍可用同一組代碼再次修改；到期後將自動隱藏。`
   )
 
   try {
@@ -725,13 +725,8 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
     })
 
     if (row.status === "draft") {
-      const expired = row.token_expires_at ? new Date(row.token_expires_at).getTime() < Date.now() : false
-      if (expired) {
-        await removeFromStorage(row.image_url)
-        await supabaseAdmin.from(TABLE).delete().eq("id", row.id)
-        await replyText(replyToken, `貼文代碼已逾時（${TOKEN_TTL_MINS} 分鐘）。草稿與圖片已刪除，請重新上傳圖片。`)
-        return
-      }
+      // ★ 即使草稿過期，仍允許用戶繼續編輯和發佈
+      // 不限制一定要在 30 分鐘內完成，保留彈性
       if (!row.image_url) {
         await replyText(replyToken, "圖片仍在處理中，請稍等幾秒再回覆「修改+代碼」。若持續失敗，請重新上傳圖片。")
         return
