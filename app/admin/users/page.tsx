@@ -78,9 +78,10 @@ export default function AdminUsersPage() {
   // LINE 暱稱同步
   const [syncingNames, setSyncingNames] = useState(false)
   
-  // 記憶回復功能 - 備份開啟通知的用戶列表
+  // 記憶回復功能 - 備份通知狀態
   const [backupUserIds, setBackupUserIds] = useState<string[]>([])
   const [hasBackup, setHasBackup] = useState(false)
+  const [backupOperation, setBackupOperation] = useState<"enable" | "disable" | null>(null)
   
   const [isMobile, setIsMobile] = useState(false)
 
@@ -106,8 +107,9 @@ export default function AdminUsersPage() {
         if (backup) {
           const data = JSON.parse(backup)
           setBackupUserIds(data.userIds || [])
+          setBackupOperation(data.operation || null)
           setHasBackup(true)
-          console.log(`[備份] 已載入 ${data.userIds?.length || 0} 位用戶的備份`)
+          console.log(`[備份] 已載入 ${data.userIds?.length || 0} 位用戶的備份（操作：${data.operation}）`)
         }
       } catch (error) {
         console.error("載入備份數據失敗:", error)
@@ -231,16 +233,18 @@ export default function AdminUsersPage() {
   }
 
   // 儲存備份到 localStorage
-  const saveBackup = (userIds: string[]) => {
+  const saveBackup = (userIds: string[], operation: "enable" | "disable") => {
     try {
       const backup = {
         userIds,
+        operation,
         timestamp: new Date().toISOString(),
       }
       localStorage.setItem("lineNotifyBackup", JSON.stringify(backup))
       setBackupUserIds(userIds)
+      setBackupOperation(operation)
       setHasBackup(true)
-      console.log(`[備份] 已保存 ${userIds.length} 位用戶的狀態`)
+      console.log(`[備份] 已保存 ${userIds.length} 位用戶的狀態（操作：${operation}）`)
     } catch (error) {
       console.error("保存備份失敗:", error)
     }
@@ -251,6 +255,7 @@ export default function AdminUsersPage() {
     try {
       localStorage.removeItem("lineNotifyBackup")
       setBackupUserIds([])
+      setBackupOperation(null)
       setHasBackup(false)
       console.log("[備份] 已清除備份")
     } catch (error) {
@@ -262,30 +267,37 @@ export default function AdminUsersPage() {
   const bulkToggleNotify = async (enable: boolean) => {
     setBulkProcessing(true)
     try {
-      // ★ 如果是關閉操作，先備份當前開啟通知的用戶
-      if (!enable) {
-        // 從 API 獲取當前所有用戶
-        const response = await fetch("/api/admin/line-users")
-        const result = await response.json()
+      // ★ 執行操作前先備份當前狀態
+      // 從 API 獲取當前所有用戶
+      const response = await fetch("/api/admin/line-users")
+      const result = await response.json()
+      
+      if (result.success) {
+        // 一鍵關閉：備份當前開啟的用戶
+        // 一鍵開啟：備份當前關閉的用戶（即所有未開啟的用戶）
+        const targetUsers = (result.users || []).filter((u: any) => {
+          if (enable) {
+            // 開啟操作：備份當前關閉通知的用戶
+            return u.followed && !u.notify_new_post
+          } else {
+            // 關閉操作：備份當前開啟通知的用戶
+            return u.followed && u.notify_new_post
+          }
+        })
         
-        if (result.success) {
-          const enabledUsers = (result.users || []).filter(
-            (u: any) => u.followed && u.notify_new_post
-          )
-          const userIds = enabledUsers.map((u: any) => u.user_id)
-          
-          // 保存備份
-          saveBackup(userIds)
-          
-          toast({
-            title: "已備份當前狀態",
-            description: `已保存 ${userIds.length} 位開啟通知的用戶資料`,
-          })
-        }
+        const userIds = targetUsers.map((u: any) => u.user_id)
+        
+        // 保存備份（記錄執行的操作類型）
+        saveBackup(userIds, enable ? "enable" : "disable")
+        
+        toast({
+          title: "已備份當前狀態",
+          description: `已保存 ${userIds.length} 位用戶的通知狀態`,
+        })
       }
 
       // ★ 執行批量更新（使用 API）
-      const response = await fetch("/api/admin/line-users", {
+      const updateResponse = await fetch("/api/admin/line-users", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -294,9 +306,9 @@ export default function AdminUsersPage() {
         }),
       })
 
-      const result = await response.json()
-      if (!result.success) {
-        throw new Error(result.message || "批量更新失敗")
+      const updateResult = await updateResponse.json()
+      if (!updateResult.success) {
+        throw new Error(updateResult.message || "批量更新失敗")
       }
 
       // 重新載入數據
@@ -321,7 +333,7 @@ export default function AdminUsersPage() {
 
   // 回復到備份的狀態
   const restoreFromBackup = async () => {
-    if (!hasBackup || backupUserIds.length === 0) {
+    if (!hasBackup || backupUserIds.length === 0 || !backupOperation) {
       toast({
         title: "無可用備份",
         description: "沒有找到備份數據",
@@ -332,42 +344,74 @@ export default function AdminUsersPage() {
 
     setBulkProcessing(true)
     try {
-      // ★ 步驟1：先關閉所有用戶的通知（使用 API）
-      const disableResponse = await fetch("/api/admin/line-users", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          bulkUpdate: true,
-          enableAll: false,
-        }),
-      })
-
-      const disableResult = await disableResponse.json()
-      if (!disableResult.success) {
-        throw new Error("關閉所有通知失敗")
-      }
-
-      // ★ 步驟2：只開啟備份列表中的用戶通知
-      // 由於 API 不支持 .in() 操作，我們逐一更新
-      const updatePromises = backupUserIds.map(userId =>
-        fetch("/api/admin/line-users", {
+      if (backupOperation === "disable") {
+        // ★ 從一鍵關閉回復：備份的是原本開啟的用戶
+        // 步驟1：先關閉所有用戶的通知
+        const disableResponse = await fetch("/api/admin/line-users", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            userId,
-            notifyNewPost: true,
+            bulkUpdate: true,
+            enableAll: false,
           }),
         })
-      )
 
-      await Promise.all(updatePromises)
+        const disableResult = await disableResponse.json()
+        if (!disableResult.success) {
+          throw new Error("關閉所有通知失敗")
+        }
+
+        // 步驟2：開啟備份列表中的用戶通知
+        const updatePromises = backupUserIds.map(userId =>
+          fetch("/api/admin/line-users", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              userId,
+              notifyNewPost: true,
+            }),
+          })
+        )
+
+        await Promise.all(updatePromises)
+      } else if (backupOperation === "enable") {
+        // ★ 從一鍵開啟回復：備份的是原本關閉的用戶
+        // 步驟1：先開啟所有用戶的通知
+        const enableResponse = await fetch("/api/admin/line-users", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            bulkUpdate: true,
+            enableAll: true,
+          }),
+        })
+
+        const enableResult = await enableResponse.json()
+        if (!enableResult.success) {
+          throw new Error("開啟所有通知失敗")
+        }
+
+        // 步驟2：關閉備份列表中的用戶通知
+        const updatePromises = backupUserIds.map(userId =>
+          fetch("/api/admin/line-users", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              userId,
+              notifyNewPost: false,
+            }),
+          })
+        )
+
+        await Promise.all(updatePromises)
+      }
 
       // 重新載入數據
       await loadLineUsers()
 
       toast({
         title: "回復成功",
-        description: `已回復 ${backupUserIds.length} 位用戶的通知狀態`,
+        description: `已回復到一鍵${backupOperation === "disable" ? "關閉" : "開啟"}前的狀態`,
       })
 
       // 清除備份（回復後就不需要了）
@@ -695,7 +739,7 @@ export default function AdminUsersPage() {
                           已有備份可用
                         </p>
                         <p className="text-sm text-blue-700 dark:text-blue-300">
-                          已保存 {backupUserIds.length} 位用戶的通知狀態，可透過「批量操作」進行回復
+                          已保存一鍵{backupOperation === "disable" ? "關閉" : "開啟"}前的狀態（{backupUserIds.length} 位用戶），可透過「批量操作」進行回復
                         </p>
                       </div>
                     </div>
@@ -830,7 +874,7 @@ export default function AdminUsersPage() {
               選擇要執行的操作：
               {hasBackup && (
                 <span className="block mt-2 text-blue-600 dark:text-blue-400">
-                  ✓ 已有備份（{backupUserIds.length} 位用戶）
+                  ✓ 已有備份：一鍵{backupOperation === "disable" ? "關閉" : "開啟"}前的狀態（{backupUserIds.length} 位用戶）
                 </span>
               )}
             </AlertDialogDescription>
@@ -861,7 +905,7 @@ export default function AdminUsersPage() {
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white"
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                回復上次狀態（{backupUserIds.length} 位用戶）
+                回復到一鍵{backupOperation === "disable" ? "關閉" : "開啟"}前（{backupUserIds.length} 位用戶）
               </Button>
             )}
           </div>
