@@ -98,6 +98,7 @@ async function loadCombinedNewsData(): Promise<NewsItem[]> {
       note: post.note ?? null,
       post_token_hash: post.post_token_hash ?? null,
       token_expires_at: post.token_expires_at ?? null,
+      status: post.status ?? "draft", // ★ 保留原始狀態
     }))
     allNews.push(...mappedBackendNews)
   } else if (backendData.status === "rejected") {
@@ -758,9 +759,20 @@ export default function NewsPage() {
                   
                   {/* 狀態 */}
                   <TableCell className="w-[100px]">
-                    <Badge variant={news.isPublished ? "default" : "outline"} className="w-fit">
+                    <Badge 
+                      variant={
+                        news.status === "published" ? "default" : 
+                        news.status === "archived" ? "secondary" : 
+                        "outline"
+                      } 
+                      className={`w-fit ${
+                        news.status === "archived" ? "bg-gray-500 text-white" : ""
+                      }`}
+                    >
                       <Eye className="h-3 w-3 mr-1" />
-                      {news.isPublished ? "已發布" : "草稿"}
+                      {news.status === "published" ? "已發布" : 
+                       news.status === "archived" ? "已歸檔" : 
+                       "草稿"}
                     </Badge>
                   </TableCell>
                   <TableCell className="w-[80px]">

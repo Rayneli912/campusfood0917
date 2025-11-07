@@ -128,4 +128,5 @@ export interface NewsItem {
   note?: string // 備註
   post_token_hash?: string // 貼文代碼雜湊
   token_expires_at?: string // 代碼過期時間
+  status?: "draft" | "published" | "archived" // 貼文狀態：草稿/已發布/已歸檔
 } 

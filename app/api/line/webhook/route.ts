@@ -282,26 +282,39 @@ async function removeFromStorage(publicUrl?: string | null) {
   if (p) await supabaseAdmin.storage.from(BUCKET).remove([p]).catch(() => {})
 }
 async function cleanupExpiredDrafts() {
+  // ★ 草稿過期（30分鐘未完成發佈）：保留記錄，不刪除圖片和資料
+  // 這樣管理員可以在後台看到未完成的草稿，用戶也可能稍後繼續編輯
   const nowIso = new Date().toISOString()
   const { data, error } = await supabaseAdmin
-    .from(TABLE).select("id,image_url").eq("status","draft")
+    .from(TABLE).select("id").eq("status","draft")
     .lt("token_expires_at", nowIso).limit(200)
   if (error) { console.error("[cleanup] draft select", error); return }
   if (!data?.length) return
-  await Promise.all(data.map((r:any)=>removeFromStorage(r.image_url)))
-  const { error: delErr } = await supabaseAdmin.from(TABLE).delete().in("id", data.map((r:any)=>r.id))
-  if (delErr) console.error("[cleanup] draft delete", delErr)
+  
+  console.log(`[cleanup] 找到 ${data.length} 個過期草稿，保留在資料庫中（不刪除）`)
+  // ★ 不執行刪除操作，保留草稿狀態供管理員查看
 }
 async function cleanupExpiredPublished() {
+  // ★ 已發佈貼文過期（7天）：改為 archived 狀態，保留圖片和資料
+  // 管理員後台可以看到，但用戶端不顯示
   const nowIso = new Date().toISOString()
   const { data, error } = await supabaseAdmin
-    .from(TABLE).select("id,image_url").eq("status","published")
+    .from(TABLE).select("id").eq("status","published")
     .lt("token_expires_at", nowIso).limit(200)
   if (error) { console.error("[cleanup] published select", error); return }
   if (!data?.length) return
-  await Promise.all(data.map((r:any)=>removeFromStorage(r.image_url)))
-  const { error: delErr } = await supabaseAdmin.from(TABLE).delete().in("id", data.map((r:any)=>r.id))
-  if (delErr) console.error("[cleanup] published delete", delErr)
+  
+  // ★ 將狀態改為 archived（歸檔），不刪除記錄和圖片
+  const { error: updateErr } = await supabaseAdmin
+    .from(TABLE)
+    .update({ status: "archived" })
+    .in("id", data.map((r:any)=>r.id))
+  
+  if (updateErr) {
+    console.error("[cleanup] published archive error", updateErr)
+  } else {
+    console.log(`[cleanup] 已將 ${data.length} 個過期貼文改為 archived 狀態`)
+  }
 }
 let lastCleanup = 0
 function scheduleCleanup() {
@@ -648,7 +661,7 @@ async function handleImageOnly(messageId: string, userId: string | undefined, re
     `圖片新增成功！貼文代碼：${token}\n\n` +
     `請在 ${TOKEN_TTL_MINS} 分鐘內回覆以下內容來完成發佈：\n` +
     `修改+${token}\n【地點】：\n【物品】：\n【數量】：\n【領取期限】：\n【備註】：（可省略）\n\n` +
-    `＊發佈後 7 天內仍可用同一組代碼再次修改；到期將自動刪除。`
+    `＊發佈後 7 天內仍可用同一組代碼再次修改；到期後將自動隱藏（管理員可在後台查看）。`
   )
 
   try {
