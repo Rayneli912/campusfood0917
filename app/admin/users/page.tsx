@@ -188,22 +188,8 @@ export default function AdminUsersPage() {
     if (viewMode === "line") {
       loadLineUsers()
     }
-
-    // ★ 定期輪詢更新（因為 Realtime 可能受 RLS 限制）
-    // 當用戶在 LINE 好友頁面時，每 30 秒自動刷新一次
-    let intervalId: NodeJS.Timeout | null = null
-    if (viewMode === "line") {
-      intervalId = setInterval(() => {
-        console.log("[Admin] 自動刷新 LINE 用戶列表")
-        loadLineUsers()
-      }, 30000) // 30 秒
-    }
-
-    return () => {
-      if (intervalId) {
-        clearInterval(intervalId)
-      }
-    }
+    // ★ 只在切換到 LINE 好友頁面時載入一次
+    // 之後只透過手動按鈕（同步暱稱/重新整理）來刷新數據
   }, [viewMode])
 
   // 切換單個用戶的即食通知
