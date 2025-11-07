@@ -162,14 +162,16 @@ export default function AdminUsersPage() {
   const loadLineUsers = async () => {
     setLoadingLineUsers(true)
     try {
-      const { data, error } = await supabase
-        .from("line_user_settings")
-        .select("*")
-        .order("created_at", { ascending: false })
+      // ★ 使用 API 路由來獲取數據（使用 service role key，繞過 RLS）
+      const response = await fetch("/api/admin/line-users")
+      const result = await response.json()
 
-      if (error) throw error
+      if (!result.success) {
+        throw new Error(result.message || "載入失敗")
+      }
 
-      setLineUsers(data || [])
+      setLineUsers(result.users || [])
+      console.log(`[Admin] 已載入 ${result.users?.length || 0} 位 LINE 用戶`)
     } catch (error) {
       console.error("載入 LINE 用戶列表時發生錯誤:", error)
       toast({
@@ -187,16 +189,20 @@ export default function AdminUsersPage() {
       loadLineUsers()
     }
 
-    // 訂閱 Supabase Realtime 更新
-    const channel = supabase
-      .channel("line_user_settings_changes")
-      .on("postgres_changes", { event: "*", schema: "public", table: "line_user_settings" }, () => {
+    // ★ 定期輪詢更新（因為 Realtime 可能受 RLS 限制）
+    // 當用戶在 LINE 好友頁面時，每 30 秒自動刷新一次
+    let intervalId: NodeJS.Timeout | null = null
+    if (viewMode === "line") {
+      intervalId = setInterval(() => {
+        console.log("[Admin] 自動刷新 LINE 用戶列表")
         loadLineUsers()
-      })
-      .subscribe()
+      }, 30000) // 30 秒
+    }
 
     return () => {
-      supabase.removeChannel(channel)
+      if (intervalId) {
+        clearInterval(intervalId)
+      }
     }
   }, [viewMode])
 
@@ -204,12 +210,20 @@ export default function AdminUsersPage() {
   const toggleNotifyForUser = async (userId: string, currentStatus: boolean) => {
     setUpdatingNotify(userId)
     try {
-      const { error } = await supabase
-        .from("line_user_settings")
-        .update({ notify_new_post: !currentStatus })
-        .eq("user_id", userId)
+      // ★ 使用 API 路由來更新
+      const response = await fetch("/api/admin/line-users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          notifyNewPost: !currentStatus,
+        }),
+      })
 
-      if (error) throw error
+      const result = await response.json()
+      if (!result.success) {
+        throw new Error(result.message || "更新失敗")
+      }
 
       // 重新載入數據
       await loadLineUsers()
@@ -264,33 +278,40 @@ export default function AdminUsersPage() {
     try {
       // ★ 如果是關閉操作，先備份當前開啟通知的用戶
       if (!enable) {
-        // 從資料庫獲取當前開啟通知的用戶列表
-        const { data: enabledUsers, error: fetchError } = await supabase
-          .from("line_user_settings")
-          .select("user_id")
-          .eq("followed", true)
-          .eq("notify_new_post", true)
-
-        if (fetchError) throw fetchError
-
-        const userIds = (enabledUsers || []).map(u => u.user_id)
+        // 從 API 獲取當前所有用戶
+        const response = await fetch("/api/admin/line-users")
+        const result = await response.json()
         
-        // 保存備份
-        saveBackup(userIds)
-        
-        toast({
-          title: "已備份當前狀態",
-          description: `已保存 ${userIds.length} 位開啟通知的用戶資料`,
-        })
+        if (result.success) {
+          const enabledUsers = (result.users || []).filter(
+            (u: any) => u.followed && u.notify_new_post
+          )
+          const userIds = enabledUsers.map((u: any) => u.user_id)
+          
+          // 保存備份
+          saveBackup(userIds)
+          
+          toast({
+            title: "已備份當前狀態",
+            description: `已保存 ${userIds.length} 位開啟通知的用戶資料`,
+          })
+        }
       }
 
-      // 執行批量更新
-      const { error } = await supabase
-        .from("line_user_settings")
-        .update({ notify_new_post: enable })
-        .eq("followed", true) // 只更新仍在追蹤的用戶
+      // ★ 執行批量更新（使用 API）
+      const response = await fetch("/api/admin/line-users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bulkUpdate: true,
+          enableAll: enable,
+        }),
+      })
 
-      if (error) throw error
+      const result = await response.json()
+      if (!result.success) {
+        throw new Error(result.message || "批量更新失敗")
+      }
 
       // 重新載入數據
       await loadLineUsers()
@@ -325,22 +346,35 @@ export default function AdminUsersPage() {
 
     setBulkProcessing(true)
     try {
-      // ★ 步驟1：先關閉所有用戶的通知
-      const { error: disableError } = await supabase
-        .from("line_user_settings")
-        .update({ notify_new_post: false })
-        .eq("followed", true)
+      // ★ 步驟1：先關閉所有用戶的通知（使用 API）
+      const disableResponse = await fetch("/api/admin/line-users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bulkUpdate: true,
+          enableAll: false,
+        }),
+      })
 
-      if (disableError) throw disableError
+      const disableResult = await disableResponse.json()
+      if (!disableResult.success) {
+        throw new Error("關閉所有通知失敗")
+      }
 
       // ★ 步驟2：只開啟備份列表中的用戶通知
-      const { error: restoreError } = await supabase
-        .from("line_user_settings")
-        .update({ notify_new_post: true })
-        .in("user_id", backupUserIds)
-        .eq("followed", true) // 確保只更新仍在追蹤的用戶
+      // 由於 API 不支持 .in() 操作，我們逐一更新
+      const updatePromises = backupUserIds.map(userId =>
+        fetch("/api/admin/line-users", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            userId,
+            notifyNewPost: true,
+          }),
+        })
+      )
 
-      if (restoreError) throw restoreError
+      await Promise.all(updatePromises)
 
       // 重新載入數據
       await loadLineUsers()
