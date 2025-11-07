@@ -414,7 +414,16 @@ async function publishTextOnly(
   const nowIso = new Date().toISOString()
 
   // ★ 步驟1：發佈到資料庫（網頁）- 這是核心功能
-  const { error } = await supabaseAdmin.from(TABLE).insert({
+  console.log(`[LINE] 無照片直接發佈（代碼: ${token}）`)
+  console.log(`[LINE] 發佈資料:`, {
+    location: fields.location,
+    item: fields.item,
+    quantity: fields.quantity,
+    deadline: fields.deadline,
+    note: fields.note,
+  })
+  
+  const insertData = {
     line_user_id: userId ?? null,
     location: fields.location,
     content,
@@ -422,16 +431,25 @@ async function publishTextOnly(
     deadline: fields.deadline,
     note: fields.note ?? "",
     image_url: null,
-    status: "published",
+    status: "published" as const,
     source: "line",
     post_token_hash: hashed,
     token_expires_at: PostTokenManager.getExpirationDate(PUBLISHED_TTL_DAYS),
     published_at: nowIso,
-  })
+  }
+  
+  const { error } = await supabaseAdmin.from(TABLE).insert(insertData)
   
   if (error) {
-    console.error("publishTextOnly insert error:", error)
-    await replyText(replyToken, "系統忙碌中，請稍後再試。")
+    console.error("[LINE] ❌ 發佈失敗:", {
+      error,
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+      token,
+    })
+    await replyText(replyToken, `系統忙碌中，請稍後再試。\n錯誤：${error.message || "發佈失敗"}`)
     return
   }
 
@@ -644,13 +662,34 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
   if (!token) { await replyText(replyToken, "請輸入：修改+代碼 地點:xxx 物品:xxx 數量:xxx  領取期限:今天18:00"); return }
 
   try {
+    console.log(`[LINE] 查詢代碼: ${token}`)
+    const tokenHash = PostTokenManager.hashToken(token)
+    console.log(`[LINE] 代碼雜湊: ${tokenHash.substring(0, 16)}...`)
+    
     const { data: rows, error } = await supabaseAdmin
       .from(TABLE).select("id,status,token_expires_at,image_url,line_user_id")
-      .eq("post_token_hash", PostTokenManager.hashToken(token))
+      .eq("post_token_hash", tokenHash)
       .order("created_at",{ascending:false}).limit(1)
 
-    if (error) { console.error("fetch by token error", error); await replyText(replyToken, "系統忙碌中，請稍後再試。"); return }
-    if (!rows?.length) { await replyText(replyToken, "找不到對應貼文；請確認代碼或重新建立新貼文。"); return }
+    if (error) {
+      console.error("[LINE] ❌ 查詢代碼失敗:", {
+        error,
+        message: error.message,
+        details: error.details,
+        code: error.code,
+        token,
+      })
+      await replyText(replyToken, `系統忙碌中，請稍後再試。\n錯誤：${error.message || "查詢失敗"}`)
+      return
+    }
+    
+    if (!rows?.length) {
+      console.log(`[LINE] ⚠️ 找不到代碼對應的貼文: ${token}`)
+      await replyText(replyToken, "找不到對應貼文；請確認代碼或重新建立新貼文。")
+      return
+    }
+    
+    console.log(`[LINE] ✓ 找到貼文: ID=${rows[0].id}, status=${rows[0].status}`)
 
     if (!parsed.success) {
       await replyText(replyToken, `還缺：${(parsed.errors || []).join("、")}（代碼 ${token}）\n請補齊後再送出。`)
@@ -679,22 +718,44 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
       const nowIso = new Date().toISOString()
 
       // ★ 步驟1：發佈到資料庫（網頁）- 這是核心功能
-      const { error: updErr } = await supabaseAdmin.from(TABLE).update({
+      console.log(`[LINE] 準備更新草稿為已發佈（代碼: ${token}, ID: ${row.id}）`)
+      console.log(`[LINE] 更新資料:`, {
+        location: d.location,
+        item: d.item,
+        quantity: d.quantity,
+        deadline: d.deadline,
+        note: d.note,
+      })
+      
+      const updateData = {
         location: d.location,
         content,
         quantity: d.quantity,
         deadline: d.deadline ?? "",
         note: d.note ?? "",
-        status: "published",
+        status: "published" as const,
         source: "line",
         line_user_id: userId ?? null,
         token_expires_at: PostTokenManager.getExpirationDate(PUBLISHED_TTL_DAYS),
         published_at: nowIso,
-      }).eq("id", row.id)
+      }
+      
+      const { error: updErr } = await supabaseAdmin
+        .from(TABLE)
+        .update(updateData)
+        .eq("id", row.id)
       
       if (updErr) {
-        console.error("update draft->publish err", updErr)
-        await replyText(replyToken, "系統忙碌中，請稍後再試。")
+        console.error("[LINE] ❌ 資料庫更新失敗:", {
+          error: updErr,
+          message: updErr.message,
+          details: updErr.details,
+          hint: updErr.hint,
+          code: updErr.code,
+          rowId: row.id,
+          token,
+        })
+        await replyText(replyToken, `系統忙碌中，請稍後再試。\n錯誤：${updErr.message || "未知錯誤"}`)
         return
       }
 
