@@ -146,7 +146,8 @@ async function multicastTo(userIds: string[], messages: any[]) {
 async function getLineUserProfile(userId: string): Promise<{ displayName: string } | null> {
   try {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 3000)
+    // ★ 縮短超時時間到 1.5 秒，避免阻塞主流程
+    const timer = setTimeout(() => controller.abort(), 1500)
     const res = await fetch(`https://api.line.me/v2/bot/profile/${userId}`, {
       headers: {
         Authorization: `Bearer ${env("LINE_CHANNEL_ACCESS_TOKEN")}`,
@@ -156,7 +157,7 @@ async function getLineUserProfile(userId: string): Promise<{ displayName: string
     clearTimeout(timer)
     
     if (!res.ok) {
-      console.error("Failed to get LINE user profile", res.status)
+      console.warn(`[LINE] 獲取用戶資料失敗 (${res.status})，跳過更新暱稱`)
       return null
     }
     
@@ -165,7 +166,8 @@ async function getLineUserProfile(userId: string): Promise<{ displayName: string
       displayName: data.displayName || null,
     }
   } catch (e) {
-    console.error("Error fetching LINE user profile:", e)
+    // ★ 靜默處理錯誤，不影響主流程
+    console.warn("[LINE] 無法獲取用戶資料（網路問題），跳過更新暱稱")
     return null
   }
 }
@@ -205,23 +207,30 @@ async function getSubscribedUserIds(): Promise<string[]> {
   return (data || []).map((r: any) => r.user_id)
 }
 
-// ===================== 更新用戶暱稱 =====================
-async function updateUserDisplayName(userId: string) {
-  try {
-    const profile = await getLineUserProfile(userId)
-    if (profile?.displayName) {
-      await supabaseAdmin.from(PREFS).upsert(
-        {
-          user_id: userId,
-          display_name: profile.displayName,
-          last_name_update: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
-      )
+// ===================== 更新用戶暱稱（非關鍵功能，完全異步） =====================
+function updateUserDisplayName(userId: string) {
+  // ★ 改為完全非阻塞：直接返回 Promise，不等待結果
+  Promise.resolve().then(async () => {
+    try {
+      const profile = await getLineUserProfile(userId)
+      if (profile?.displayName) {
+        await supabaseAdmin.from(PREFS).upsert(
+          {
+            user_id: userId,
+            display_name: profile.displayName,
+            last_name_update: new Date().toISOString(),
+          },
+          { onConflict: "user_id" }
+        )
+        console.log(`[LINE] ✓ 已更新用戶暱稱: ${profile.displayName}`)
+      }
+    } catch (e) {
+      // ★ 靜默處理，完全不影響主流程
+      console.warn("[LINE] 更新用戶暱稱失敗（不影響發佈功能）")
     }
-  } catch (e) {
-    console.error("Failed to update user display name:", e)
-  }
+  }).catch(() => {
+    // ★ 雙重保險，確保任何錯誤都不會冒泡
+  })
 }
 /** ★只有改這裡：多一個時間字串參數 */
 async function broadcastNewPostNotice(tsLabel: string) {
@@ -506,8 +515,8 @@ export async function POST(req: NextRequest) {
       }
 
       if (event.type === "postback") {
-        // 每次互動時更新用戶暱稱
-        if (userId) updateUserDisplayName(userId).catch(() => {})
+        // 每次互動時更新用戶暱稱（非阻塞，背景執行）
+        if (userId) updateUserDisplayName(userId)
         
         const data = parsePostbackData((event as any).postback?.data)
         if (userId && data.action === "notify_status") {
@@ -532,8 +541,8 @@ export async function POST(req: NextRequest) {
       }
 
       if (event.type === "message") {
-        // 每次訊息互動時更新用戶暱稱
-        if (userId) updateUserDisplayName(userId).catch(() => {})
+        // 每次訊息互動時更新用戶暱稱（非阻塞，背景執行）
+        if (userId) updateUserDisplayName(userId)
         
         if (event.message.type === "image") {
           await handleImageOnly(event.message.id, userId, replyToken)
