@@ -9,4 +9,10 @@ if (!SERVICE_ROLE) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY")
 
 export const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE, {
   auth: { persistSession: false, autoRefreshToken: false },
+  db: { schema: 'public' },
+  global: {
+    headers: {
+      'x-connection-encrypted': 'true',
+    },
+  },
 })

@@ -659,10 +659,10 @@ async function handleImageOnly(messageId: string, userId: string | undefined, re
 
   await replyText(
     replyToken,
-    `圖片新增成功！貼文代碼：${token}\n\n` +
+    `圖片新增成功！貼文代碼：${token}\n` +
+    `＊發佈後 7 天內仍可用同一組代碼再次修改；到期後將自動隱藏。\n\n` +
     `請在 ${TOKEN_TTL_MINS} 分鐘內回覆以下內容來完成發佈：\n` +
-    `修改+${token}\n【地點】：\n【物品】：\n【數量】：\n【領取期限】：\n【備註】：（可省略）\n\n` +
-    `＊發佈後 7 天內仍可用同一組代碼再次修改；到期後將自動隱藏。`
+    `修改+${token}\n【地點】：\n【物品】：\n【數量】：\n【領取期限】：\n【備註】：（可省略）`
   )
 
   try {
