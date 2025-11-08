@@ -471,7 +471,8 @@ async function publishTextOnly(
       code: error.code,
       token,
     })
-    await replyText(replyToken, `系統忙碌中，請稍後再試。\n錯誤：${error.message || "發佈失敗"}`)
+    console.error("[發佈失敗] 詳細錯誤:", error)
+    await replyText(replyToken, "發佈失敗，請稍後再試。若持續發生問題，請重新上傳。")
     return
   }
 
@@ -652,7 +653,7 @@ async function handleImageOnly(messageId: string, userId: string | undefined, re
   })
   if (insertErr) {
     console.error("create draft error (pre-insert):", insertErr)
-    await replyText(replyToken, "系統忙碌中，請稍後再試。")
+    await replyText(replyToken, "上傳圖片失敗，請稍後再試。")
     return
   }
 
@@ -681,7 +682,13 @@ async function handleImageOnly(messageId: string, userId: string | undefined, re
 async function handleEditPost(text: string, userId: string | undefined, replyToken: string | undefined) {
   const parsed = LineMessageParser.parseEditPostMessage(text)
   const token = parsed.token || extractToken(text)
-  if (!token) { await replyText(replyToken, "請輸入：修改+代碼 地點:xxx 物品:xxx 數量:xxx  領取期限:今天18:00"); return }
+  if (!token) { 
+    await replyText(
+      replyToken, 
+      "找不到貼文代碼，請確認格式：\n\n修改+代碼\n【地點】：xxx\n【物品】：xxx\n【數量】：xxx\n【領取期限】：xxx\n\n例如：修改+ABC123 然後接上完整內容"
+    )
+    return 
+  }
 
   try {
     console.log(`[LINE] 查詢代碼: ${token}`)
@@ -701,7 +708,8 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
         code: error.code,
         token,
       })
-      await replyText(replyToken, `系統忙碌中，請稍後再試。\n錯誤：${error.message || "查詢失敗"}`)
+      console.error("[查詢貼文失敗] 詳細錯誤:", error)
+      await replyText(replyToken, "無法查詢貼文代碼，請稍後再試。若持續發生問題，請重新上傳。")
       return
     }
     
@@ -714,7 +722,11 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
     console.log(`[LINE] ✓ 找到貼文: ID=${rows[0].id}, status=${rows[0].status}`)
 
     if (!parsed.success) {
-      await replyText(replyToken, `還缺：${(parsed.errors || []).join("、")}（代碼 ${token}）\n請補齊後再送出。`)
+      const missingFields = (parsed.errors || []).join("、")
+      await replyText(
+        replyToken, 
+        `格式不完整，缺少：${missingFields}\n\n請確認已填寫：\n【地點】、【物品】、【數量】、【領取期限】\n\n再次回覆「修改+${token}」加上完整內容即可。`
+      )
       return
     }
 
@@ -772,7 +784,8 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
           rowId: row.id,
           token,
         })
-        await replyText(replyToken, `系統忙碌中，請稍後再試。\n錯誤：${updErr.message || "未知錯誤"}`)
+        console.error("[草稿發佈失敗] 詳細錯誤:", updErr)
+        await replyText(replyToken, "發佈失敗，請稍後再試。若持續發生問題，請重新上傳圖片。")
         return
       }
 
@@ -794,12 +807,12 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
       return
     }
 
-    const canEdit =
-      row.token_expires_at && new Date(row.token_expires_at).getTime() > Date.now() &&
-      (!row.line_user_id || !userId || row.line_user_id === userId)
+    // ★ 只檢查是否過期，不限制原發布者
+    // 任何人只要知道代碼都可以修改
+    const expired = row.token_expires_at && new Date(row.token_expires_at).getTime() < Date.now()
 
-    if (!canEdit) {
-      await replyText(replyToken, "此貼文已超過可編輯期限，或你不是原上傳者。請重新發佈新貼文。")
+    if (expired) {
+      await replyText(replyToken, "此貼文代碼已過期，無法再修改。如需發佈請重新上傳。")
       return
     }
 
@@ -813,8 +826,8 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
     }).eq("id", row.id)
     
     if (upd2) {
-      console.error("update published edit err", upd2)
-      await replyText(replyToken, "系統忙碌中，請稍後再試。")
+      console.error("[已發佈貼文修改失敗] 詳細錯誤:", upd2)
+      await replyText(replyToken, "修改失敗，請稍後再試。")
       return
     }
 
@@ -829,5 +842,8 @@ async function handleEditPost(text: string, userId: string | undefined, replyTok
       `${d.note ? `【備註】${d.note}` : ""}\n\n` +
       `＊此貼文將在 ${PUBLISHED_TTL_DAYS} 天後自動刪除（或剩餘期間內可再修改）。`
     )
-  } catch (e) { console.error("handleEditPost", e); await replyText(replyToken, "系統忙碌中，請稍後再試。") }
+  } catch (e) { 
+    console.error("[handleEditPost 錯誤]", e)
+    await replyText(replyToken, "處理修改時發生錯誤，請稍後再試。") 
+  }
 }
